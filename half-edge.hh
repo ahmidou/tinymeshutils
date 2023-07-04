@@ -29,19 +29,22 @@ SOFTWARE.
 #include <algorithm>
 #include <cstdint>
 #include <vector>
-
+#include "tsl/robin_map.h"
 //#include <iostream>  // DBG
 
 // Using robin-map may give better performance
-#if defined(TINYMESHUTILS_USE_ROBINMAP)
-#error TODO
-#include <tsl/robin_hash.h>
 
+#if defined(TINYMESHUTILS_USE_ROBINMAP)
+#if __has_include("tsl/robin_map.h")
+//#error TODO
+#include <tsl/robin_map.h>
+template<class K, class V, class _Hasher = std::hash<K>>
+using umap = tsl::robin_map<K, V>;
+#endif
 #else
 #include <unordered_map>
-
-// namespace umap = std::unordered_map;
-
+template<class K, class V, class _Hasher = std::hash<K>>
+using umap = std::unordered_map<K, V, _Hasher>;
 #endif
 
 namespace tinymeshutils {
@@ -60,12 +63,12 @@ struct Edge {
 };
 
 struct HalfEdge {
-  // invalid or undefined = -1
-  int64_t opposite_halfedge{-1};  // index to the halfedges array.
-  int64_t next_halfedge{-1};      // index to the halfedges array.
-  // int64_t vertex_index{-1}; // vertex index at the start of the edge
-  int64_t face_index{-1};  // index to face indices
-  int64_t edge_index{-1};  // index to edge indices
+  // invalid or undefined = MAXUINT32
+  uint32_t twin{MAXUINT32};  // index to the halfedges array.
+  uint32_t next{MAXUINT32};      // index to the halfedges array.
+  uint32_t vertex_index{MAXUINT32}; // vertex index at the start of the edge
+  uint32_t face_index{MAXUINT32};  // index to face indices
+  uint32_t index{MAXUINT32};  // index to edge indices
 };
 
 // Functor object for Edge
@@ -91,7 +94,7 @@ struct EdgeHash {
 /// @param[out] halfedges Array of half-edges comstructed. length =
 /// face_vert_indices.size()
 /// @param[out] vertex_starting_halfedge_indices Index to starting half-edge in
-/// `halfedges` for each vertex. -1 when no half-edge assigned to its vertex.
+/// `halfedges` for each vertex. MAXUINT32 when no half-edge assigned to its vertex.
 /// length = the highest value in `face_vert_indices`(= the number of vertices)
 /// face_vert_indices.size()
 /// @param[out] err Optional error message.
@@ -100,13 +103,13 @@ struct EdgeHash {
 /// topology.
 ///
 /// face_vert_indices.size() is equal to the sum of each elements in
-/// `face_vert_counts`. Assume edge is defined in v0 -> v1, v1 -> v2, ... v(N-1)
+/// `face_vert_counts`. Assume edge is defined in v0 -> v1, v1 -> v2, ... v(-1)
 /// -> v0 order.
 ///
 bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
                    const std::vector<uint32_t> &face_vert_counts,
                    std::vector<Edge> *edges, std::vector<HalfEdge> *halfedges,
-                   std::vector<int64_t> *vertex_starting_halfedge_indices,
+                   std::vector<uint32_t> *vertex_starting_halfedge_indices,std::vector<uint32_t> *faceData,
                    std::string *err = nullptr);
 
 }  // namespace tinymeshutils
@@ -119,10 +122,12 @@ namespace tinymeshutils {
 bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
                    const std::vector<uint32_t> &face_vert_counts,
                    std::vector<Edge> *edges, std::vector<HalfEdge> *halfedges,
-                   std::vector<int64_t> *vertex_starting_halfedge_indices,
+                   std::vector<uint32_t> *vertex_starting_halfedge_indices, std::vector<uint32_t> *faceData,
                    std::string *err) {
   // Based on documents at Internet and an implementation
   // https://github.com/yig/halfedge
+
+  std::vector<uint32_t> faceData_buf(face_vert_counts);
 
   size_t num_indices = 0;
   for (size_t i = 0; i < face_vert_counts.size(); i++) {
@@ -134,22 +139,20 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
   }
 
   // Find larget number = the number of vertices in input mesh.
-  uint32_t num_vertices =
-      (*std::max_element(face_vert_indices.begin(), face_vert_indices.end())) +
-      1;
-  std::vector<int64_t> vertex_starting_halfedge_indices_buf(num_vertices, -1);
+  uint32_t num_vertices = (*std::max_element(face_vert_indices.begin(), face_vert_indices.end())) +1;
+  std::vector<uint32_t> vertex_starting_halfedge_indices_buf(num_vertices, MAXUINT32);
 
   // allocate buffer for half-edge.
   std::vector<HalfEdge> halfedge_buf(num_indices);
 
-  std::unordered_map<std::pair<int32_t, int32_t>, size_t, EdgeHash>
+  umap<std::pair<int32_t, int32_t>, size_t, EdgeHash>
       halfedge_table;  // <<v0, v1>, index to `half_edges`>
 
   //
   // 1. Build edges.
   //
   std::vector<Edge> edge_buf;  // linear array of edges.
-  std::unordered_map<uint64_t, size_t>
+  umap<uint64_t, size_t>
       edge_map;  // <un oriented edge index, index to edge array>
 
   {
@@ -252,16 +255,19 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
           return false;
         }
 
-        size_t edge_index = edge_map[eid];
+        size_t index = edge_map[eid];
 
         size_t halfedge_offset = f_offset + e;
 
         halfedge_table[std::make_pair(v0, v1)] = halfedge_offset;
 
-        halfedge_buf[halfedge_offset].edge_index = int64_t(edge_index);
-        halfedge_buf[halfedge_offset].face_index = int64_t(f);
-        halfedge_buf[halfedge_offset].next_halfedge =
-            int64_t(f_offset + (e + 1) % nv);
+        halfedge_buf[halfedge_offset].index = uint32_t(index);
+        halfedge_buf[halfedge_offset].vertex_index = uint32_t(v0);
+        halfedge_buf[halfedge_offset].face_index = uint32_t(f);
+        halfedge_buf[halfedge_offset].next = uint32_t(f_offset + (e + 1) % nv);
+
+        if(e==0)
+          faceData_buf[f] = uint32_t(halfedge_offset);
 
         if (size_t(v0) >= vertex_starting_halfedge_indices_buf.size()) {
           if (err) {
@@ -274,10 +280,9 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
           return false;
         }
 
-        if (vertex_starting_halfedge_indices_buf[size_t(v0)] == -1) {
+        if (vertex_starting_halfedge_indices_buf[size_t(v0)] == MAXUINT32) {
           // Set as starting half-edge
-          vertex_starting_halfedge_indices_buf[size_t(v0)] =
-              int64_t(halfedge_offset);
+          vertex_starting_halfedge_indices_buf[size_t(v0)] = uint32_t(halfedge_offset);
         }
       }
 
@@ -287,8 +292,8 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
 
   // dbg
   // for (size_t i = 0; i < halfedge_buf.size(); i++) {
-  //  std::cout << "halfedge_buf[" << i << "].edge_index = " <<
-  //  halfedge_buf[i].edge_index << "\n";
+  //  std::cout << "halfedge_buf[" << i << "].index = " <<
+  //  halfedge_buf[i].index << "\n";
   //}
 
   //
@@ -296,10 +301,10 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
   //
   for (size_t i = 0; i < halfedge_buf.size(); i++) {
     HalfEdge &halfedge = halfedge_buf[i];
-    if ((halfedge.edge_index == -1) ||
-        (halfedge.edge_index >= int64_t(edge_buf.size()))) {
+    if ((halfedge.index == MAXUINT32) ||
+        (halfedge.index >= uint32_t(edge_buf.size()))) {
       if (err) {
-        (*err) = "Invalid edge_index " + std::to_string(halfedge.edge_index) +
+        (*err) = "Invalid index " + std::to_string(halfedge.index) +
                  ". Must be >= 0 and < " + std::to_string(edge_buf.size()) +
                  "\n";
       }
@@ -307,7 +312,7 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
       return false;
     }
 
-    const Edge &edge = edge_buf[size_t(halfedge.edge_index)];
+    const Edge &edge = edge_buf[size_t(halfedge.index)];
 
     if (halfedge_table.count(std::make_pair(edge.v1, edge.v0)) &&
         halfedge_table.count(std::make_pair(edge.v0, edge.v1))) {
@@ -340,23 +345,24 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
         return false;
       }
 
-      HalfEdge &opposite_halfedge = halfedge_buf[opposite_halfedge_index];
+      HalfEdge &twin = halfedge_buf[opposite_halfedge_index];
 
-      if (opposite_halfedge.edge_index != halfedge.edge_index) {
+      if (twin.index != halfedge.index) {
         if (err) {
-          (*err) = "Edge id mismatch. opposite_halfedge.edge_index " +
-                   std::to_string(opposite_halfedge.edge_index) +
-                   " must be equal to halfedge.edge_index " +
-                   std::to_string(halfedge.edge_index) + "\n";
+          (*err) = "Edge id mismatch. twin.index " +
+                   std::to_string(twin.index) +
+                   " must be equal to halfedge.index " +
+                   std::to_string(halfedge.index) + "\n";
         }
         return false;
       }
 
       // Make a link.
-      halfedge.opposite_halfedge = int64_t(opposite_halfedge_index);
+      halfedge.twin = uint32_t(opposite_halfedge_index);
     }
   }
 
+  (*faceData) = faceData_buf;
   (*edges) = edge_buf;
   (*halfedges) = halfedge_buf;
   (*vertex_starting_halfedge_indices) = vertex_starting_halfedge_indices_buf;
@@ -367,9 +373,9 @@ bool BuildHalfEdge(const std::vector<uint32_t> &face_vert_indices,
 
   for (size_t i = 0; i < halfedge_buf.size(); i++) {
     std::cout << "halfedge[" << i << "]. face = " << halfedge_buf[i].face_index
-              << ", edge = " << halfedge_buf[i].edge_index
-              << ", opposite he = " << halfedge_buf[i].opposite_halfedge
-              << ", next he = " << halfedge_buf[i].next_halfedge << "\n";
+              << ", edge = " << halfedge_buf[i].index
+              << ", opposite he = " << halfedge_buf[i].twin
+              << ", next he = " << halfedge_buf[i].next << "\n";
   }
 
   for (size_t i = 0; i < vertex_starting_halfedge_indices_buf.size(); i++) {
